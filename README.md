@@ -6,6 +6,9 @@ Locks the processed folders to prevent re-processing the same files that have al
 *It is recommended to use Foobar2000 and set the output to the original track folder and convert each track to an individual file*
 
 ## How to use:
+
+  Install Python either via the .exe provided by their [website](https://www.python.org/downloads/) (Make sure to tick the "add python to PATH") or via the [Microsoft Store](https://apps.microsoft.com/detail/9ncvdn91xzqp?hl=en-US&gl=US)
+  
   Place both Batch and Python scripts on the root of your music library, double click the batch file and choose the options according to your needs
 
 https://github.com/user-attachments/assets/01a22004-e407-4cb1-83fc-74f0d1842935
