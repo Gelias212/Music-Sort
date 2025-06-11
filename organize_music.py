@@ -3,10 +3,10 @@ import shutil
 import time
 import sys
 import threading
+import mmap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def display_menu(title, options):
-    """Display a menu and get user choice"""
     print("\n" + "=" * 60)
     print(f"{title}")
     print("=" * 60)
@@ -21,7 +21,6 @@ def display_menu(title, options):
         print("Invalid choice. Please try again.")
 
 def get_yes_no(prompt):
-    """Get yes/no input from user"""
     while True:
         response = input(f"{prompt} (y/n): ").strip().lower()
         if response in ['y', 'yes']:
@@ -31,7 +30,6 @@ def get_yes_no(prompt):
         print("Please enter 'y' or 'n'")
 
 def select_formats():
-    """Let user select which formats to process"""
     options = {
         '1': {'label': "Process FLAC files only", 'formats': ['.flac']},
         '2': {'label': "Process AAC files only", 'formats': ['.m4a']},
@@ -45,7 +43,6 @@ def select_formats():
     return options[choice]['formats']
 
 def select_output_mode():
-    """Let user select output verbosity"""
     options = {
         '1': {'label': "Verbose mode (show all operations)", 'mode': 'verbose'},
         '2': {'label': "Progress bar (visual indicator)", 'mode': 'progress'},
@@ -55,9 +52,8 @@ def select_output_mode():
     return options[choice]['mode']
 
 def select_thread_count():
-    """Let user select number of threads to use"""
     cpu_count = os.cpu_count() or 4
-    default_threads = min(cpu_count * 2, 16)  # Reasonable default
+    default_threads = min(cpu_count * 2, 16)
     
     print("\n" + "=" * 60)
     print("MULTITHREADING CONFIGURATION")
@@ -79,7 +75,6 @@ def select_thread_count():
             print("Please enter a valid number")
 
 def get_folder_deletion_preference():
-    """Ask about folder deletion preferences"""
     options = {
         '1': {'label': "Delete empty folders automatically", 'mode': 'auto'},
         '2': {'label': "Ask before deleting each folder", 'mode': 'ask'},
@@ -89,7 +84,6 @@ def get_folder_deletion_preference():
     return options[choice]['mode']
 
 def get_processing_confirmation(selected_formats, output_mode, delete_mode, thread_count):
-    """Show summary and get final confirmation"""
     print("\n" + "=" * 60)
     print("PROCESSING SUMMARY")
     print("=" * 60)
@@ -101,7 +95,6 @@ def get_processing_confirmation(selected_formats, output_mode, delete_mode, thre
     return get_yes_no("Start processing?")
 
 def scan_total_files(protected_paths, selected_formats):
-    """Scan all files to get total count for progress tracking"""
     print("\nScanning files...")
     total_files = 0
     
@@ -118,7 +111,6 @@ def scan_total_files(protected_paths, selected_formats):
     return total_files
 
 def update_progress(progress, total, start_time):
-    """Display progress bar and ETA"""
     percent = (progress / total) * 100
     bar_length = 50
     filled_length = int(bar_length * progress // total)
@@ -134,30 +126,42 @@ def update_progress(progress, total, start_time):
     sys.stdout.write(f"\rProgress: |{bar}| {percent:.1f}% ({progress}/{total}) {eta_str}")
     sys.stdout.flush()
 
+def copy_large_file(src, dst, buffer_size=16*1024*1024):
+    try:
+        with open(src, 'rb') as fsrc:
+            with mmap.mmap(fsrc.fileno(), 0, access=mmap.ACCESS_READ) as mmapped_src:
+                with open(dst, 'wb') as fdst:
+                    offset = 0
+                    while offset < len(mmapped_src):
+                        chunk = mmapped_src[offset:offset+buffer_size]
+                        fdst.write(chunk)
+                        offset += buffer_size
+        shutil.copystat(src, dst)
+        return True
+    except Exception as e:
+        print(f"Error copying {src}: {str(e)}")
+        return False
+
 def process_file(filepath, stats, selected_formats, output_mode, dir_lock, protected_paths):
-    """Process a single file (thread-safe)"""
     try:
         filename = os.path.basename(filepath)
         ext = os.path.splitext(filename)[1].lower()
         abs_filepath = os.path.abspath(filepath)
         
-        # Skip files in protected roots
         if any(abs_filepath.startswith(p) for p in protected_paths):
             with stats['lock']:
                 stats['skipped'] += 1
             return
             
-        # Process audio files
         if ext in selected_formats:
             dest_root = stats['roots_map'][ext]
             rel_path = os.path.relpath(os.path.dirname(filepath), '.')
             dest_dir = os.path.join(dest_root, rel_path)
             dest_path = os.path.join(dest_dir, filename)
             
-            # Create directory with thread lock
             if not os.path.exists(dest_dir):
                 with dir_lock:
-                    if not os.path.exists(dest_dir):  # Double-check
+                    if not os.path.exists(dest_dir):
                         os.makedirs(dest_dir, exist_ok=True)
                         if output_mode == 'verbose':
                             print(f"Created directory: {dest_dir}")
@@ -172,7 +176,6 @@ def process_file(filepath, stats, selected_formats, output_mode, dir_lock, prote
                 with stats['lock']:
                     stats['skipped'] += 1
         
-        # Process non-audio files
         elif ext in ['.jpg', '.jpeg', '.png', '.cue', '.txt', '.log', '.nfo']:
             copied = False
             for dest_root in stats['protected_roots']:
@@ -180,26 +183,39 @@ def process_file(filepath, stats, selected_formats, output_mode, dir_lock, prote
                 dest_dir = os.path.join(dest_root, rel_path)
                 dest_path = os.path.join(dest_dir, filename)
                 
-                # Create directory with thread lock
                 if not os.path.exists(dest_dir):
                     with dir_lock:
-                        if not os.path.exists(dest_dir):  # Double-check
+                        if not os.path.exists(dest_dir):
                             os.makedirs(dest_dir, exist_ok=True)
                             if output_mode == 'verbose':
                                 print(f"Created directory: {dest_dir}")
                 
                 if not os.path.exists(dest_path):
-                    shutil.copy2(filepath, dest_path)
-                    copied = True
-                    with stats['lock']:
-                        stats['non_audio'] += 1
-                    if output_mode == 'verbose':
-                        print(f"Copied non-audio: {filepath} -> {dest_path}")
+                    if os.path.getsize(filepath) > 10 * 1024 * 1024:
+                        if copy_large_file(filepath, dest_path):
+                            copied = True
+                            with stats['lock']:
+                                stats['non_audio'] += 1
+                            if output_mode == 'verbose':
+                                print(f"Copied large non-audio: {filepath} -> {dest_path}")
+                    else:
+                        shutil.copy2(filepath, dest_path)
+                        copied = True
+                        with stats['lock']:
+                            stats['non_audio'] += 1
+                        if output_mode == 'verbose':
+                            print(f"Copied non-audio: {filepath} -> {dest_path}")
             
             if copied:
-                os.remove(filepath)
-                if output_mode == 'verbose':
-                    print(f"Deleted original: {filepath}")
+                try:
+                    os.remove(filepath)
+                    if output_mode == 'verbose':
+                        print(f"Deleted original: {filepath}")
+                except Exception as e:
+                    with stats['lock']:
+                        stats['errors'] += 1
+                    if output_mode != 'minimal':
+                        print(f"Error deleting {filepath}: {str(e)}")
     
     except Exception as e:
         with stats['lock']:
@@ -207,14 +223,12 @@ def process_file(filepath, stats, selected_formats, output_mode, dir_lock, prote
         if output_mode != 'minimal':
             print(f"\nError processing {filepath}: {str(e)}")
     
-    # Update progress counter
     with stats['lock']:
         stats['processed'] += 1
         if output_mode == 'progress' and stats['total_files'] > 0:
             update_progress(stats['processed'], stats['total_files'], stats['start_time'])
 
 def main():
-    # Configuration
     PROTECTED_ROOTS = ['FLAC', 'AAC', 'MP3']
     ROOTS_MAP = {
         '.flac': 'FLAC',
@@ -226,16 +240,19 @@ def main():
     print("MULTITHREADED MUSIC LIBRARY ORGANIZER")
     print("=" * 60)
     print("Current directory: " + os.getcwd())
+    print("\nPlease confirm this is the root of your music library.")
     
-    # Create protected roots if they don't exist
+    if not get_yes_no("Is this the correct directory?"):
+        print("\nOperation cancelled. Please place this script in your music library root.")
+        input("\nPress Enter to exit...")
+        return
+    
     for root_name in PROTECTED_ROOTS:
         if not os.path.exists(root_name):
             os.makedirs(root_name, exist_ok=True)
     
-    # Get absolute paths of protected roots
     protected_paths = [os.path.abspath(p) for p in PROTECTED_ROOTS]
     
-    # User selections
     selected_formats = select_formats()
     output_mode = select_output_mode()
     thread_count = select_thread_count()
@@ -245,7 +262,6 @@ def main():
         print("Processing cancelled by user.")
         return
     
-    # Prepare statistics object with thread-safe locks
     stats = {
         'audio': 0,
         'non_audio': 0,
@@ -258,7 +274,6 @@ def main():
         'protected_roots': PROTECTED_ROOTS
     }
     
-    # Scan total files for progress bar
     if output_mode == 'progress':
         with stats['lock']:
             stats['total_files'] = scan_total_files(protected_paths, selected_formats)
@@ -267,11 +282,9 @@ def main():
     
     print("\nStarting processing with {} threads...".format(thread_count))
     
-    # Thread coordination tools
     dir_lock = threading.Lock()
     file_queue = []
     
-    # Collect all files to process
     for root, _, files in os.walk('.'):
         abs_root = os.path.abspath(root)
         if any(abs_root.startswith(p) for p in protected_paths):
@@ -283,7 +296,6 @@ def main():
             if ext in selected_formats or ext in ['.jpg', '.jpeg', '.png', '.cue', '.txt', '.log', '.nfo']:
                 file_queue.append(filepath)
     
-    # Process files using thread pool
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
         futures = [executor.submit(
             process_file, 
@@ -295,14 +307,12 @@ def main():
             protected_paths
         ) for filepath in file_queue]
         
-        # Wait for all tasks to complete
         for future in as_completed(futures):
-            pass  # We get results through stats object
+            pass
     
     if output_mode == 'progress':
-        print("\n")  # Move to new line after progress bar
+        print("\n")
     
-    # Folder cleanup (single-threaded)
     if delete_mode != 'none':
         print("\nCleaning empty folders...")
         empty_count = 0
@@ -336,7 +346,6 @@ def main():
             if delete_mode == 'ask':
                 print(f"Skipped {skipped_count} folders by user choice")
     
-    # Final summary
     elapsed = time.time() - stats['start_time']
     print("\n" + "=" * 60)
     print("PROCESSING SUMMARY")
