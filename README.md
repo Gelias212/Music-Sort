@@ -1,6 +1,6 @@
 # Music Sort
 
-Quick Sorting Script to organize large music libraries by fyle type, preserves folder structure (Eg:Artist/Album/Title.FLAC) artwork and .CUE files
+Quick Sorting Script to organize large music libraries by fyle type (M4A, MP3, FLAC, etc) and creates folders accordingly, preserves folder structure (Eg:Artist/Album/Title.FLAC) artwork and .CUE files
 Locks the processed folders to prevent re-processing the same files that have already been processed.
 
 *It is recommended to use Foobar2000 and set the output to the original track folder and convert each track to an individual file*
